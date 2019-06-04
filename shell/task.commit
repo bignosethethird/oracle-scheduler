@@ -1,0 +1,128 @@
+#!/bin/bash
+# Set up log file
+LOG_DIR=~/log
+[[ ! -d $LOG_DIR ]] && mkdir $LOG_DIR
+LOGFILE=$(basename $0)
+LOGFILE=${LOG_DIR}/${LOGFILE%\.*}.log
+rm -f $LOGFILE
+touch $LOGFILE
+chmod 666 $LOGFILE
+
+# Set up tmp directory
+TMP_DIR=~/tmp
+[[ ! -d $TMP_DIR ]] && mkdir $TMP_DIR
+SESSION_LOCK_FILE=$TMP_DIR/task.edit
+REF_FILE=$TMP_DIR/task.edit.ref
+TMP_FILE=$TMP_DIR/task.edit.tmp
+typeset -r NULL_VALUE='null'
+
+[[ $1 = --help  || $1 = -h ]] && printf "
+Usage: `basename $0` {TaskId}
+
+This script it called after a number of task attributed for a task been set
+and commits the changed to the task. The parameters that are to be modified
+are stored as as a list in the file $SESSION_LOCK_FILE.
+There is only one such file in the environment, which means that only one
+task at a time can be edited.
+
+It is not necessary to specify the TaskId on the commamd line, but if it is
+specified, then it will be verified against the content of the file
+$SESSION_LOCK_FILE. If the verification fails, then all
+proposed changes to the task are abandoned.
+
+" && exit 0
+
+# Get TaskId if the user did specify it
+USER_TASK_ID=$1
+
+
+cleanup() {
+  rm -f $SESSION_LOCK_FILE > /dev/null 2>&1
+  kill -9 %1 > /dev/null 2>&1
+  exit
+}
+
+# kill tailing process
+trap cleanup  INT TERM HUP EXIT
+
+# Do some basic interlocking here since we do not have a mechanism to
+# establish and persist a unique session Id from many terminal emulators.
+if [[ ! -d $TMP_DIR || ! -a $SESSION_LOCK_FILE ]]; then
+  printf "
+  You need to start the editing process using the task.edit command
+  before any changes can be committed with this command.
+  Exiting...
+"
+  exit 1
+fi
+
+# Get the task Id
+SESSION_LOCK_TASK_ID=$(cat $SESSION_LOCK_FILE | grep TASK_ID | awk '{print $2}')
+if [[ -z $SESSION_LOCK_TASK_ID ]]; then
+  printf "
+  The file containing changes to the the task is invalid.
+  All edits will be abandoned.
+  Exiting...
+"
+  rm -f $SESSION_LOCK_FILE
+  exit 1
+fi
+
+# Sanity check that the user knows what he is doing:
+if [[ -n $USER_TASK_ID ]]; then
+  if [[ $SESSION_LOCK_TASK_ID -ne $USER_TASK_ID ]]; then
+    printf "
+  You are currently editing TaskId $SESSION_LOCK_TASK_ID.
+  This is the only task that you can commit.
+  All edits will be abandoned.
+  Exiting...
+"
+    exit 1
+  fi
+fi
+
+# Collect all accumulated changes so far and make up final SQL command
+printf "Committing the following attributes to task Id $SESSION_LOCK_TASK_ID:\n" | tee -a $LOGFILE
+LINE=1
+SQLCOMMAND="scheduler.scheduler_con.task_alter("
+while read ARG VAL; do
+  # Strip inverted commas
+  VAL=$(echo $VAL | sed -e 's/^"//g' -e 's/"$//g')
+  # Make up command parameter
+  if [[ $VAL = $NULL_VALUE ]]; then
+    # Deal with null values
+    # We send an explicit string null so that PL/SQL does not treat it as a default parameter.
+    SQLCOMMAND="${SQLCOMMAND} p_${ARG}=>'null',"
+  elif [[ "${VAL##to_date}" != $VAL ]]; then
+    # Deal with date values
+    SQLCOMMAND="${SQLCOMMAND} p_${ARG}=>${VAL},"
+  else
+    # Strings an numbers
+    SQLCOMMAND="${SQLCOMMAND} p_${ARG}=>'${VAL}',"
+  fi
+  printf "  ${LINE}:  ${ARG} = ${VAL}\n"
+  let LINE=$LINE+1
+done < $SESSION_LOCK_FILE
+rm -f $SESSION_LOCK_FILE
+
+# Strip trailing comma and close parenthesis on SQL command
+SQLCOMMAND="${SQLCOMMAND%%,})"
+print $SQLCOMMAND >> $LOGFILE
+
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+S=$(sqlplus -s / <<!
+set feedback off
+set serveroutput on size 100000
+var i number
+exec  :i:=$SQLCOMMAND;
+quit :i
+!
+) &
+
+wait %2 # Wait for second process to finish
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process
+
+

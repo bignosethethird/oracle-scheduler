@@ -1,0 +1,29 @@
+#!/usr/bin/bash
+# Peers task groups
+[[ ${1} = --help  || ${1} = -h  || -z ${1} || -z ${2} || -n $(echo $2 | sed -e 's/[0-9]//g' -e 's/-//g') ]] && printf "
+Usage: `basename $0` GroupName Priority
+
+Updates task the specified group's relative priority.
+Priority can be any interger number.
+
+" && exit 1
+
+
+# kill tailing process
+trap kill -9 %1 > /dev/null 2>&1 && exit INT TERM HUP EXIT
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+S=$(sqlplus -s / <<!
+set feedback off
+set serveroutput on size 100000
+var i number
+exec  :i:=scheduler.scheduler_con.group_priority('${1}',${2});
+quit :i
+!
+) &
+
+wait %2 # Wait for second process to finish
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process
+

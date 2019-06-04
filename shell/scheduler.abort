@@ -1,0 +1,27 @@
+#!/usr/bin/bash
+# Aborts all tasks currently running on the scheduler
+# and does not allow new tasks to be started.
+# Check the status of the scheduler with the command
+# $ scheduler.status
+# The aborting process has been completed the status of
+# the scheduler is 'ABORTED'.
+# The scheduler can be restarted using the command
+# $ scheduler.startup
+
+# kill tailing process
+trap kill -9 %1 > /dev/null 2>&1 && exit INT TERM HUP EXIT
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+S=$(sqlplus -s / <<!
+set feedback off
+set serveroutput on size 100000
+var i number
+exec  :i:=scheduler.scheduler_con.scheduler_abort;
+quit :i
+!
+) &
+
+wait %2 # Wait for second process to finish
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process

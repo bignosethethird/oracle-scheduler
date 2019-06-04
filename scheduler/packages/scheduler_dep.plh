@@ -1,0 +1,84 @@
+create or replace package scheduler.scheduler_dep
+as
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- DO NOT "BEAUTIFY" THIS CODE LEST YOU BE SHOT AT DAWN.
+--
+-- Dependency management functions for the scheduler
+-------------------------------------------------------------------------------
+
+--===========================================================================--
+-- GLOBAL SYSTEM-WIDE CONSTANTS
+--===========================================================================--
+pc_package                  constant varchar2(30):=  'scheduler_dep';
+pc_schema                   constant varchar2(30):=  'scheduler';
+
+gc_parent                   constant varchar2(12):=  'PARENT';
+gc_parentchild              constant varchar2(12):=  'PARENTCHILD';
+gc_child                    constant varchar2(12):=  'CHILD';
+gc_independent              constant varchar2(12):=  'INDEPENDENT';
+
+--===========================================================================--
+-- PRIVATE FUNCTIONS
+--===========================================================================--
+
+function make_dependency_sql(p_dependency in varchar2) return varchar2;
+
+--===========================================================================--
+-- PUBLIC FUNCTIONS
+--===========================================================================--
+
+-- Determines the task hierarchical position in the dependency net
+-- PARENT         Has child tasks only
+-- PARENTCHILD    Has parent tasks and child tasks
+-- CHILD          Has parent tasks but no child tasks
+-- INDEPENDENT    No parent or child tasks
+function get_hierarchy(p_task_id in schedules.task_id%type) return varchar2;
+
+-- For a given node in the tree, get all the child nodes
+-- including the current node
+-- Returns the number of child nodes or 0 if none found
+function get_child_nodes(p_task_id in schedules.task_id%type, p_child_nodes in out sched.t_schedules)
+return pls_integer;
+
+-- For a given node in the tree, get all parent nodes
+-- including the current node
+-- Returns the number of parent nodes or 0 if none found
+function get_parent_nodes(p_task_id in schedules.task_id%type, p_parent_nodes in out sched.t_schedules)
+return pls_integer;
+
+-- Get all the tasks in the dependency net
+-- Recursive function
+-- Returns when no new tasks have been added
+procedure get_net_tasks(
+  p_curr_net_tasks in out sched.t_schedules,  -- Current accumulated set of tasks
+  p_prev_net_tasks in out sched.t_schedules,  -- Set of accumulated at previous recursion  
+  p_task_id in schedules.task_id%type,        -- Task Id to start the next exploration from 
+  p_curr_pos in pls_integer:=1);              -- Current position in p_curr_net_tasks to iterate from 
+
+-- Checks if all tasks in the tree have completed. Returns all tasks in tree.
+function is_dependency_tree_done(p_task_spec in sched.t_schedule_rec, 
+                                 p_tasks_in_tree out sched.t_schedules) return boolean;
+
+-- Returns TRUE if the dependancies for this job are completed
+-- Returns FALSE if not, or other error
+function is_dependencies_satisfied(p_task_spec in out sched.t_schedule_rec) return boolean;
+
+-- Check if any mutually-excluded tasks are running
+function is_mutual_task_running(p_task_spec in out sched.t_schedule_rec) return boolean;
+
+-- Check if any peered tasks are running
+function is_peer_task_running(p_task_spec in out sched.t_schedule_rec) return boolean;
+
+-- Check if this task in a peered group that is already running
+function is_peer_group_running(p_task_spec in out sched.t_schedule_rec) return boolean;
+
+
+-- Validates the task's dependencies
+function validate_dependencies(p_task_spec in out sched.t_schedule_rec) return UTL.global.t_error_code;
+
+end scheduler_dep;
+-------------------------------------------------------------------------------
+-- end of file
+-------------------------------------------------------------------------------
+/

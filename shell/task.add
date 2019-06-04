@@ -1,0 +1,530 @@
+#!/bin/bash
+# Set up log file
+LOG_DIR=~/log
+[[ ! -d $LOG_DIR ]] && mkdir $LOG_DIR
+LOGFILE=$(basename $0)
+LOGFILE=${LOG_DIR}/${LOGFILE%\.*}.log
+rm -f $LOGFILE
+touch $LOGFILE
+chmod 666 $LOGFILE
+
+# Set up tmp directory
+TMP_DIR=~/tmp
+[[ ! -d $TMP_DIR ]] && mkdir $TMP_DIR
+SESSION_LOCK_FILE=$TMP_DIR/task.add
+REF_FILE=$TMP_DIR/task.add.ref
+TMP_FILE=$TMP_DIR/task.add.tmp
+typeset -r NULL_VALUE='null'
+
+cleanup() {
+  rm -f $SESSION_LOCK_FILE > /dev/null 2>&1
+  kill -9 %1 > /dev/null 2>&1
+  exit
+}
+
+# kill tailing process
+trap cleanup  INT TERM HUP EXIT
+
+# Add or replace items in list so that none are dulpicated.
+# This is important, since the PL/SQL function call does not
+# like duplicate parameters.
+# Parameters:
+#   1 Argument
+#   2 Value, which can be a string of words
+AddUniqueParameter(){
+  ARG=$1
+  VAL=$2
+  LINE=1
+  FOUND=0
+  LINES=0
+  if [[ -a $SESSION_LOCK_FILE ]]; then
+    LINES=$(cat $SESSION_LOCK_FILE | wc -l)
+    # Check if the item already exists.
+    while read _ARG _VAL; do
+      if [[ $_ARG = $ARG ]]; then
+        FOUND=1
+        break
+      fi
+      LINE=$((LINE+1))
+    done < $SESSION_LOCK_FILE
+  else
+    touch $SESSION_LOCK_FILE
+  fi
+
+  if [[ $FOUND -ne 0 ]]; then
+    # Replace line in file
+    head -$((LINE-1)) $SESSION_LOCK_FILE > $TMP_FILE
+    printf "$ARG \"$VAL\"\n" >> $TMP_FILE
+    tail -$((LINES-LINE)) $SESSION_LOCK_FILE >> $TMP_FILE
+    mv $TMP_FILE $SESSION_LOCK_FILE
+  else
+    printf "$ARG \"$VAL\"\n" >> $SESSION_LOCK_FILE
+  fi
+}
+
+# Main
+if [[ -z $1 ]]; then
+  printf "
+Usage: `basename $0` [OPTIONS]
+
+OPTIONS:
+  --submitted_by    User name
+  --task_type       DURABLE (default), VOLATILE, TIMECRITICAL or PERSISTENT
+  --task_priority   Relative task priority to other tasks
+  --task_peers      Comma-delimited list of Task Id's to peer this task with
+  --group_name      Name
+  --group_priority  Relative priority to other task groups
+  --operation_id    Assigned operation Id
+  --command         SQL or UNIX code procedure to be executed
+  --command_type    SQL, SHELL, FUNCTION, PROCEDURE
+  --description     Description of what this task does
+  --dependencies    Logical expression using GROUP:OPERATION_ID
+  --max_waittime    Time to wait in minutes. Default: Wait forever
+  --max_runtime     Max RunTime in minutes before aborting task
+  --year            Only for this year. Default: Null
+  --month           Annual pattern, specify month in year
+  --day             Monthly pattern, specify day in month
+  --hour            Daily pattern, specify hour in day
+  --minute          Hourly pattern, specify minute in hour
+  --weekdays        Weekdays, SUN=1,MON=2,TUE=3,WED=4,THU=5,FRI=6,SAT=7
+  --special_days    Consider preconfigured special days
+  --next_due_date   Start date of pattern, default to task creation time
+  --modal           Modal task (y/N)
+  --ignore_error    Ignore task errors (y/N)
+  --special_days    (INCLUDE, EXCLUDE, ONLY, AFTER, BEFORE)
+  --repeats         Times to repeat this task
+  --repeat_interval Minute interval between tasks
+  --repeat_periodic Calculate NEXT_DUE_DATE based on REPEAT_INTERVAL (Y/n)
+  --effective_date_offset  Dynamic offset in days
+  --change_reason   Reason for adding to the scheduler
+
+
+NOTES:
+  All other parameters are optional.
+  No spaces between list items unless list is in double inverted commas.
+  Values that were not accepted can subsequently be corrected by editing
+  the task using the commands task.edit and task.commit
+" | tee -a $LOGFILE
+  exit 1
+else
+  [[ -a $SESSION_LOCK_FILE ]] && rm -f $SESSION_LOCK_FILE
+fi;
+
+# Notes:
+# 1. KSH strips single and double inverted commas from strings passed
+#    on the command line. Add in when Oracle expects a string parameter.
+# 2. Boolean values are (in this case) expected as a string of 'T' or 'F'.
+while [[ $1 = --* ]]
+do
+  ARG=$(echo $1|cut -d'=' -f1)
+  VAL=$(echo $1|cut -d'=' -f2)
+
+  case $ARG in
+    "--submitted_by" | "--submitted-by")
+      if [[ -z $SUBMITTED_BY ]]; then
+        SUBMITTED_BY=$VAL; [[ $VAL = $ARG ]] && shift && SUBMITTED_BY=$1
+        AddUniqueParameter SUBMITTED_BY "$SUBMITTED_BY"
+      fi
+      ;;
+    "--task_type" | "--task-type")
+      if [[ -z $TASK_TYPE ]]; then
+        TASK_TYPE=$VAL; [[ $VAL = $ARG ]] && shift && TASK_TYPE=$1
+        case $TASK_TYPE in
+          DURABLE | VOLATILE | TIMECRITICAL | PERSISTENT)
+            AddUniqueParameter TASK_TYPE "$TASK_TYPE"
+            ;;
+          *)
+            printf "* Invalid parameter: --task_type must be one of the following:\n  DURABLE, VOLATILE, TIMECRITICAL, PERSISTENT.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+            ;;
+        esac
+      fi
+      ;;
+    "--task_priority" | "--task-priority")
+      if [[ -z $TASK_PRIORITY ]]; then
+        TASK_PRIORITY=$VAL; [[ $VAL = $ARG ]] && shift && TASK_PRIORITY=$1
+        if [[ -n $(echo $TASK_PRIORITY | sed -e 's/[0-9]//g' -e 's/-//g')  && $TASK_PRIORITY != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --task_priority may only contain numbers.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter TASK_PRIORITY "$TASK_PRIORITY"
+        fi
+      fi
+      ;;
+    "--task_peers" | "--task-peers")
+      if [[ -z $TASK_PEERS ]]; then
+        TASK_PEERS=$VAL; [[ $VAL = $ARG ]] && shift && TASK_PEERS=$1
+        if [[ -n $(echo $TASK_PEERS | sed -e 's/[0-9]//g' -e 's/,//g')  && $TASK_PEERS != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --task_peers may only contain numbers and commas.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter TASK_PEERS "$TASK_PEERS"
+        fi
+      fi
+      ;;
+    "--group_name" | "--group-name")
+      if [[ -z $GROUP_NAME ]]; then
+        GROUP_NAME=$VAL; [[ $VAL = $ARG ]] && shift && GROUP_NAME=$1
+        if [[ -n $(echo $GROUP_NAME | sed -e 's/[a-zA-Z]//g') ]]; then
+          printf "* Invalid parameter: --group_name may only contain alphabetical characters.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter GROUP_NAME "$GROUP_NAME"
+        fi
+      fi
+      ;;
+    "--group_priority" | "--group-priority")
+      if [[ -z $GROUP_PRIORITY ]]; then
+        GROUP_PRIORITY=$VAL; [[ $VAL = $ARG ]] && shift && GROUP_PRIORITY=$1
+        if [[ -n $(echo $GROUP_PRIORITY | sed -e 's/[0-9]//g' -e 's/-//g')  && $GROUP_PRIORITY != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --group_priority may only contain numbers.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter GROUP_PRIORITY "$GROUP_PRIORITY"
+        fi
+      fi
+      ;;
+    "--operation_id" | "--operation-id")
+      if [[ -z $OPERATION_ID ]]; then
+        OPERATION_ID=$VAL; [[ $VAL = $ARG ]] && shift && OPERATION_ID=$1
+        if [[ -n $(echo $OPERATION_ID | sed -e 's/[0-9]//g')  && $OPERATION_ID != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --operation_id may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter OPERATION_ID "$OPERATION_ID"
+        fi
+      fi
+      ;;
+    "--command")
+      if [[ -z $COMMAND ]]; then
+        COMMAND=$VAL; [[ $VAL = $ARG ]] && shift && COMMAND=$1
+        # Convert ampersants to a code
+        COMMAND=$(echo $COMMAND | sed -e 's/&/chr(38)/g')
+        AddUniqueParameter COMMAND "$COMMAND"
+      fi
+      ;;
+    "--command_type" | "--command-type")
+      if [[ -z $COMMAND_TYPE ]]; then
+        typeset -u COMMAND_TYPE=$VAL; [[ $VAL = $ARG ]] && shift && COMMAND_TYPE=$1
+        case $COMMAND_TYPE in
+          "SQL" | "SHELL" | "FUNCTION" | "PROCEDURE")
+            AddUniqueParameter COMMAND_TYPE "$COMMAND_TYPE"
+            ;;
+          *)
+            printf "* Invalid parameter: --command_type must be one of the following:\n  SQL, SHELL, FUNCTION, PROCEDURE.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+            ;;
+         esac
+      fi
+      ;;
+    "--description")
+      if [[ -z $DESCRIPTION ]]; then
+        DESCRIPTION=$VAL; [[ $VAL = $ARG ]] && shift && DESCRIPTION=$1;
+        AddUniqueParameter DESCRIPTION "$DESCRIPTION"
+      fi
+      ;;
+    "--dependencies")
+      if [[ -z $DEPENDENCIES ]]; then
+        DEPENDENCIES=$VAL; [[ $VAL = $ARG ]] && shift && DEPENDENCIES=$1
+        AddUniqueParameter DEPENDENCIES "$DEPENDENCIES"
+      fi
+      ;;
+    "--max_waittime" | "--max-waittime")
+      if [[ -z $MAX_WAITTIME ]]; then
+        MAX_WAITTIME=$VAL; [[ $VAL = $ARG ]] && shift && MAX_WAITTIME=$1
+        if [[ -n $(echo $MAX_WAITTIME | sed -e 's/[0-9]//g') && $MAX_WAITTIME != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --max_waittime may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter MAX_WAITTIME "$MAX_WAITTIME"
+        fi
+      fi
+      ;;
+    "--max_runtime" | "--max-runtime")
+      if [[ -z $MAX_RUNTIME ]]; then
+        MAX_RUNTIME=$VAL; [[ $VAL = $ARG ]] && shift && MAX_RUNTIME=$1
+        if [[ -n $(echo $MAX_RUNTIME | sed -e 's/[0-9]//g') && $MAX_RUNTIME != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --max_runtime may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter MAX_RUNTIME "$MAX_RUNTIME"
+        fi
+      fi
+      ;;
+    "--year")
+      if [[ -z $YEAR ]]; then
+        typeset -Z4 YEAR=$VAL; [[ $VAL = $ARG ]] && shift && YEAR=$1
+        if [[ -n $(echo $YEAR | sed -e 's/[0-9]//g') && $YEAR != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --year may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          if [[ ( $YEAR > 3000 || $YEAR < 2000 ) && $YEAR != $NULL_VALUE ]]; then
+            printf "* Invalid parameter: --year should be between 2000 and 3000.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            AddUniqueParameter YEAR "$YEAR"
+          fi
+        fi
+      fi
+      ;;
+    "--month")
+      if [[ -z $MONTH ]]; then
+        MONTH=$VAL; [[ $VAL = $ARG ]] && shift && MONTH=$1
+        if [[ $MONTH = $NULL_VALUE ]]; then
+          AddUniqueParameter MONTH $NULL_VALUE
+        else
+          if [[ -n $(echo $MONTH | sed -e 's/[0-9-]//g') ]]; then
+            printf "* Invalid parameter: --month may only contain digits or '$NULL_VALUE'.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            if [[ $MONTH -gt 12 || $MONTH -lt 1 ]]; then
+              printf "* Invalid parameter: --month should be between 1 and 12.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+
+            else
+              AddUniqueParameter MONTH "$MONTH"
+            fi
+          fi
+        fi
+      fi
+      ;;
+    "--day")
+      if [[ -z $DAY ]]; then
+        DAY=$VAL; [[ $VAL = $ARG ]] && shift && DAY=$1
+        if [[ $DAY = $NULL_VALUE ]]; then
+          AddUniqueParameter DAY $NULL_VALUE
+        else
+          if [[ -n $(echo $DAY | sed -e 's/[0-9-]//g') ]]; then
+            printf "* Invalid parameter: --day may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            if [[ $DAY -gt 31 || $DAY -lt -28 ]]; then
+              printf "* Invalid parameter: --day should be between -28 and 31.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+            else
+              AddUniqueParameter DAY "$DAY"
+            fi
+          fi
+        fi
+      fi
+      ;;
+    "--hour")
+      if [[ -z $HOUR ]]; then
+        HOUR=$VAL; [[ $VAL = $ARG ]] && shift && HOUR=$1
+        if [[ $HOUR = $NULL_VALUE ]]; then
+          AddUniqueParameter HOUR $NULL_VALUE
+        else
+          if [[ -n $(echo $HOUR | sed -e 's/[0-9-]//g') ]]; then
+            printf "* Invalid parameter: --hour may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            if [[ $HOUR -gt 23 || $HOUR -lt -23 ]]; then
+              printf "* Invalid parameter: --hour should be between -23 and 23 (inclusively).\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+            else
+              AddUniqueParameter HOUR "$HOUR"
+            fi
+          fi
+        fi
+      fi
+      ;;
+    "--minute")
+      if [[ -z $MINUTE ]]; then
+        MINUTE=$VAL; [[ $VAL = $ARG ]] && shift && MINUTE=$1
+        if [[ $MINUTE = $NULL_VALUE ]]; then
+          AddUniqueParameter MINUTE $NULL_VALUE
+        else
+          if [[ -n $(echo $MINUTE | sed -e 's/[0-9-]//g') ]]; then
+            printf "* Invalid parameter: --minute may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            if [[ $MINUTE -gt 59 || $MINUTE -lt -59 ]]; then
+              printf "* Invalid parameter: --minute should be between -59 and 59 (inclusively).\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+            else
+              AddUniqueParameter MINUTE "$MINUTE"
+            fi
+          fi
+        fi
+      fi
+      ;;
+    "--weekdays")
+      if [[ -z $WEEKDAYS ]]; then
+        WEEKDAYS=$VAL; [[ $VAL = $ARG ]] && shift && WEEKDAYS=$1
+        if [[ $WEEKDAYS = $NULL_VALUE ]]; then
+          AddUniqueParameter WEEKDAYS $NULL_VALUE
+        else
+          if [[ -n $(echo $WEEKDAYS | sed -e 's/[1-7.]//g') && $WEEKDAYS != $NULL_VALUE ]]; then
+            printf "* Invalid value: --weekdays must be a combination of 1,2,3,4,5,6,7.\n  Cleaning up...\n" | tee -a $LOGFILE
+          fi
+          WEEKDAYS=$(echo $WEEKDAYS | sed -e 's/[^0-7 ]//g' | sed -e 's/0/7/g');
+          # Dedupe string
+          for i in 1 2 3 4 5 6 7; do
+            if [[ $(echo $WEEKDAYS | grep $i) -ne 0 ]]; then
+              DEDUPE_WEEKDAYS="$DEDUPE_WEEKDAYS$i"
+            else
+              DEDUPE_WEEKDAYS="$DEDUPE_WEEKDAYS."
+            fi
+          done
+          AddUniqueParameter WEEKDAYS "$DEDUPE_WEEKDAYS"
+        fi
+      fi
+      ;;
+    "--next_due_date" | "--next-due-date")
+      if [[ -z $NEXT_DUE_DATE ]]; then
+        NEXT_DUE_DATE=$VAL; [[ $VAL = $ARG ]] && shift && NEXT_DUE_DATE=$1
+        if [[ -n $(echo $NEXT_DUE_DATE | sed -e 's/^2[0-9]\{7\}//g') && $NEXT_DUE_DATE != $NULL_VALUE ]]; then
+          printf "* Invalid value: --next_due_date must be in the format YYYYMMDD.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter NEXT_DUE_DATE "to_date($NEXT_DUE_DATE,'YYYYMMDD')"
+        fi
+      fi
+      ;;
+    "--repeats")
+      if [[ -z $REPEATS ]]; then
+        REPEATS=$VAL; [[ $VAL = $ARG ]] && shift && REPEATS=$1
+        if [[ -n $(echo $REPEATS | sed -e 's/[0-9]//g') && $REPEATS != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --repeats may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          if [[ $REPEATS < 0 && $REPEATS != $NULL_VALUE ]]; then
+            printf "* Invalid parameter: --repeats should be greater than 1.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            AddUniqueParameter REPEATS "$REPEATS"
+          fi
+        fi
+      fi
+      ;;
+    "--repeat_interval" | "--repeat-interval")
+      if [[ -z $REPEAT_INTERVAL ]]; then
+        REPEAT_INTERVAL=$VAL; [[ $VAL = $ARG ]] && shift && REPEAT_INTERVAL=$1
+        if [[ -n $(echo $REPEAT_INTERVAL | sed -e 's/[0-9]//g') && $REPEAT_INTERVAL != $NULL_VALUE ]]; then
+          printf "* Invalid parameter: --repeat_interval may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          if [[ $REPEAT_INTERVAL < 0 && $REPEAT_INTERVAL != $NULL_VALUE ]]; then
+            printf "* Invalid parameter: --repeat_interval should be greater than 1.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            AddUniqueParameter REPEAT_INTERVAL "$REPEAT_INTERVAL"
+          fi
+        fi
+      fi
+      ;;
+    "--repeat_periodic" | "--repeat-periodic")
+      if [[ -z $REPEAT_PERIODIC ]]; then
+        typeset -uL1 REPEAT_PERIODIC  # Boolean
+        REPEAT_PERIODIC=$VAL; [[ $VAL = $ARG ]] && shift && REPEAT_PERIODIC=$1
+        if [[ $REPEAT_PERIODIC != 'Y' && $REPEAT_PERIODIC != 'N' ]]; then
+          printf "* Invalid value: --repeat_periodic requires either Y or N.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter REPEAT_PERIODIC "$REPEAT_PERIODIC"
+        fi
+      fi
+      ;;
+    "--effective_date_offset" | "--effective-date-offset")
+      if [[ -z $EFFECTIVE_DATE_OFFSET ]]; then
+        EFFECTIVE_DATE_OFFSET=$VAL; [[ $VAL = $ARG ]] && shift && EFFECTIVE_DATE_OFFSET=$1
+        if [[ $EFFECTIVE_DATE_OFFSET = $NULL_VALUE ]]; then
+          AddUniqueParameter EFFECTIVE_DATE_OFFSET $NULL_VALUE
+        else
+          if [[ -n $(echo $EFFECTIVE_DATE_OFFSET | sed -e 's/[0-9-]//g') ]]; then
+            printf "* Invalid parameter: --effective_date_offset may only contain digits.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+          else
+            if [[ $DAY -gt 31 || $EFFECTIVE_DATE_OFFSET -lt -28 ]]; then
+              printf "* Invalid parameter: --effective_date_offset should be between -28 and 31.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+            else
+              AddUniqueParameter EFFECTIVE_DATE_OFFSET "$EFFECTIVE_DATE_OFFSET"
+            fi
+          fi
+        fi
+      fi
+      ;;
+    "--modal")
+      if [[ -z $MODAL ]]; then
+        typeset -uL1 MODAL  # Boolean
+        MODAL=$VAL; [[ $VAL = $ARG ]] && shift && MODAL=$1
+        if [[ $MODAL != 'Y' && $MODAL != 'N' ]]; then
+          printf "* Invalid value: --modal requires either Y or N.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter MODAL "$MODAL"
+        fi
+      fi
+      ;;
+    "--ignore_error" | "--ignore-error")
+      if [[ -z $IGNORE_ERROR ]]; then
+        typeset -uL1 IGNORE_ERROR # Boolean
+        IGNORE_ERROR=$VAL; [[ $VAL = $ARG ]] && shift && IGNORE_ERROR=$1
+        if [[ $IGNORE_ERROR != 'Y' && $IGNORE_ERROR != 'N' ]]; then
+          printf "* Invalid value: --ignore_error requires either Y or N.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+        else
+          AddUniqueParameter IGNORE_ERROR "$IGNORE_ERROR"
+        fi
+      fi
+      ;;
+    "--special_days" | "--special-days")
+      if [[ -z $SPECIAL_DAYS ]]; then
+        SPECIAL_DAYS=$VAL; [[ $VAL = $ARG ]] && shift && SPECIAL_DAYS=$1
+        if [[ $SPECIAL_DAYS = $NULL_VALUE ]]; then
+          AddUniqueParameter SPECIAL_DAYS $NULL_VALUE
+        else
+          typeset -u SPECIAL_DAYS # UPPER CASE
+          case $SPECIAL_DAYS in
+            INCLUDE | EXCLUDE | ONLY | AFTER | BEFORE)
+              AddUniqueParameter SPECIAL_DAYS "$SPECIAL_DAYS"
+              ;;
+            *)
+              printf "* Invalid parameter: --special_days must be one of the following:\n  INCLUDE, EXCLUDE, ONLY, AFTER, BEFORE.\n  Ignoring this attribute.\n" | tee -a $LOGFILE
+              ;;
+          esac
+        fi
+      fi
+      ;;
+    "--change_reason" | "--change-reason")
+      if [[ -z $CHANGE_REASON ]]; then
+        CHANGE_REASON=$VAL; [[ $VAL = $ARG ]] && shift && CHANGE_REASON=$1;
+        AddUniqueParameter CHANGE_REASON "$CHANGE_REASON"
+      fi
+      ;;
+
+
+    *)
+      print "Invalid option: $1" | tee -a $LOGFILE
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+# Read in current variables so far so that default values can
+# correctly be assigned.
+if [[ -f $SESSION_LOCK_FILE ]]; then
+  cat $SESSION_LOCK_FILE | sed -e 's/ /=/' > $SESSION_LOCK_FILE.ksh
+  . $SESSION_LOCK_FILE.ksh
+  rm $SESSION_LOCK_FILE.ksh
+fi
+# Add default parameters
+[[ -z $SUBMITTED_BY ]] && AddUniqueParameter SUBMITTED_BY "`logname`"
+[[ -z $CHANGE_REASON ]] && AddUniqueParameter CHANGE_REASON "Task created from the console"
+
+
+# Make up SQL command
+printf "Creating a task with the following attributes:\n" | tee -a $LOGFILE
+LINE=1
+SQLCOMMAND="scheduler.scheduler_con.task_add("
+while read ARG VAL; do
+  # Strip inverted commas
+  VAL=$(echo $VAL | sed -e 's/^"//g' -e 's/"$//g')
+  # Make up command parameter
+  if [[ $VAL = $NULL_VALUE ]]; then
+    # Deal with null values
+    # We send an explicit string null so that PL/SQL does not treat it as a default parameter.
+    SQLCOMMAND="${SQLCOMMAND} p_${ARG}=>'null',"
+  elif [[ "${VAL##to_date}" != $VAL ]]; then
+    SQLCOMMAND="${SQLCOMMAND} p_${ARG}=>${VAL},"
+  else
+    SQLCOMMAND="${SQLCOMMAND} p_${ARG}=>'${VAL}',"
+  fi
+  printf "  ${LINE}:  ${ARG} = ${VAL}\n" | tee -a $LOGFILE
+  let LINE=$LINE+1
+done < $SESSION_LOCK_FILE
+rm -f $SESSION_LOCK_FILE
+
+# Strip trailing comma and close paranthesis
+SQLCOMMAND="${SQLCOMMAND%%,})"
+print $SQLCOMMAND >> $LOGFILE
+
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+S=$(sqlplus -s / <<!
+set feedback off
+set serveroutput on size 100000
+var i number
+exec :i:=$SQLCOMMAND;
+quit :i
+!
+)
+echo $S
+
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process
+

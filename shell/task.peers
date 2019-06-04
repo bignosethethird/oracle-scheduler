@@ -1,0 +1,46 @@
+#!/usr/bin/bash
+# Peers task groups
+
+function usage {
+  printf "
+Usage: `basename $0` TaskId1 TaskId2 TaskId3 TaskId4 TaskId5...
+
+Peers tasks TaskId1 with the other TaskId's.
+"
+}
+
+[[ ${1} = --help  || ${1} = -h  || -z ${1} || -z ${2} ]] && usage && exit 1
+
+G1=$1
+shift
+while [[ -n $1 ]]; do
+  if [[ -z $FIRST_TIME ]]; then
+    FIRST_TIME=DONE
+    PEERS=$1
+  else
+    PEERS="${PEERS},${1}"
+  fi
+  shift
+done
+
+[[ $(echo $G1 | sed -e 's/[a-zA-Z]//g') != $G1 ||
+   $(echo $PEERS | sed -e 's/[a-zA-Z]//g') != $PEERS ]] && usage && exit 1
+
+# kill tailing process
+trap kill -9 %1 > /dev/null 2>&1 && exit INT TERM HUP EXIT
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+S=$(sqlplus -s / <<!
+set feedback off
+set serveroutput on size 100000
+set serveroutput on format wrapped
+var i number
+exec  :i:=scheduler.scheduler_con.task_peers('${G1}','${PEERS}');
+quit :i
+!
+) &
+
+wait %2 # Wait for second process to finish
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process

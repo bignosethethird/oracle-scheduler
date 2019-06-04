@@ -1,0 +1,30 @@
+#!/usr/bin/bash
+# Resets a task to the INITIAL state
+[[ $1 = --help  || $1 = -h  || -z $1 ]] && printf "
+Usage: `basename $0` TaskId
+
+Overrides the Scheduler FSM and sets the specified task to the INITIAL state.
+There are cases when the Scheduler FSM will prevent this from happening,
+such as when the task is currently executing.
+
+" && exit 0
+
+
+# kill tailing process
+trap kill -9 %1 > /dev/null 2>&1 && exit INT TERM HUP EXIT
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+S=$(sqlplus -s / <<!
+set feedback off
+set serveroutput on size 100000
+set serveroutput on format wrapped
+var i number
+exec  :i:=scheduler.scheduler_con.task_reset(${1:-null});
+quit :i
+!
+)
+
+printf "$S\n"
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process

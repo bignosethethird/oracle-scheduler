@@ -1,0 +1,30 @@
+#!/usr/bin/bash
+# Prods the SCHEDULER FSM for one scan.
+# This can be used when the FSM daemon has been killed.
+
+[[ -z $APP_HOME ]] && printf "
+\$APP_HOME is not defined.
+Exiting...
+" && exit 1
+
+# kill tailing process
+trap kill -9 %1 > /dev/null 2>&1 && exit INT TERM HUP EXIT
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+sqlplus -s / <<!
+set feedback off serveroutput on size 100000
+var i number
+exec scheduler.sched.fsm;
+exec :i:=utl.pkg_config.get_variable_int('SchedulerFSMScanDuration');
+begin
+  dbms_output.put_line('Scheduler FSM scan duration: '||:i||'ms');
+end;
+/
+quit :i
+!
+
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process
+
+

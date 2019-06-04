@@ -1,0 +1,87 @@
+#!/usr/bin/bash
+# Monitors the Scheduler. Checks that the DBMS_JOB job that controls the
+# Scheduler's FSM is running. If not, alerts and attempts to restart
+# DBMS_JOB job.
+#
+# Usage:
+# This script is launched as a CRON job every five minutes.
+# It is added to the CRON jobs using the following command:
+# (crontab -l | grep -v scheduler.monitor | grep -v '#'; \
+# echo "05,10,15,20,25,30,35,40,45,50,55 * * * * /app/abc/bin/scheduler.monitor ")|crontab
+# Since the CRON user is not aware of the application's environment and
+# path, all paths need to be fully qualified.
+#
+# All references to paths in this script also need to be fully qualified.
+
+# Change environment variables here:
+# %variable% is set to the appropriate value by the installer.
+# If the installer is not used, then set the desired value in the default code
+APP_HOME=/app/abc
+# Default if /app/abc has not been correctly set
+[[ ${APP_HOME%%%} = "%APP_HOME" ]] && APP_HOME=/app/abc
+
+ORACLE_HOME_TMP=$ORACLE_HOME
+ORACLE_HOME="/app/oracle/product/9.2.0"
+export ORACLE_HOME
+# Default if $ORACLE_HOME has not been correctly set
+if [[ ${ORACLE_HOME%%%} = "%ORACLE_HOME" ]]; then
+  if [[ -z $ORACLE_HOME_TMP ]]; then
+    ORACLE_HOME=/app/oracle/product/9.2.0
+  else
+    ORACLE_HOME=$ORACLE_HOME_TMP
+  fi
+fi
+
+LOG_DIR=$APP_HOME/log
+export LOG_DIR
+[[ ! -d $LOG_DIR ]] && mkdir $LOG_DIR
+LOGFILE=${LOG_DIR}/events
+export LOGFILE
+[[ ! -a $LOGFILE ]] && touch $LOGFILE && chmod 666 $LOGFILE
+
+
+ORACLE_SID="vcrd1"
+export ORACLE_SID
+
+$ORACLE_HOME/bin/sqlplus -s scheduler/scheduler@$ORACLE_SID <<!
+set feedback off
+set echo off
+set heading off
+--set serveroutput on size 100000
+var i number;
+declare
+  v_job number;
+  v_broken  varchar2(1);
+begin
+  select job,broken
+    into v_job,v_broken
+    from all_jobs
+   where lower(what) like '%sched.fsm%';
+  if(v_broken='Y')then
+    -- Job is broken. Restart.
+    utl.pkg_logger.log(utl.pkg_logger.gc_log_message_info,
+      'The scheduler.monitor daemon has restarted the Scheduler FSM after it discovered it to be broken.');
+    :i:=scheduler.scheduler_con.scheduler_kill;
+    :i:=scheduler.scheduler_con.scheduler_init;
+  else
+    :i:=0;
+  end if;
+exception
+  when no_data_found then
+    -- Job does not exit: launching
+    utl.pkg_logger.log(utl.pkg_logger.gc_log_message_info,
+      'The scheduler.monitor daemon has launched the Scheduler FSM after it discovered it to not be running.');
+    :i:=scheduler.scheduler_con.scheduler_init;
+  when others then
+    :i:=sqlcode;
+end;
+/
+quit :i
+!
+RETCODE=$?
+exit $RETCODE
+
+
+echo "Scheduler Monitor `date`" >> $LOGFILE
+echo "Current user: `id`" >> $LOGFILE
+

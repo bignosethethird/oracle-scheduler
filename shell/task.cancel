@@ -1,0 +1,33 @@
+#!/bin/bash
+# Cancels a task edit operation
+
+TMP_DIR=~/tmp
+SESSION_LOCK_FILE=$TMP_DIR/task.edit
+REF_FILE=$TMP_DIR/task.edit.ref
+
+if [[ -a $SESSION_LOCK_FILE ]]; then
+  SESSION_LOCK_TASK_ID=$(cat $SESSION_LOCK_FILE | grep TASK_ID | awk '{print $2}' )
+  # Collect all accummulated changes so far and display
+  printf "The following changes have been made for task Id $SESSION_LOCK_TASK_ID:\n"
+  LINE=1
+  while read ARG VAL; do
+    printf "${LINE}:  ${ARG} = ${VAL}\n"
+    let LINE=$LINE+1
+  done < $SESSION_LOCK_FILE
+
+  printf "Are you sure that you want to cancel all changes? (Y/n): "
+  read
+  [[ $REPLY = "Y" || $REPLY = 'y' || -z $REPLY ]] && \
+    rm -f $SESSION_LOCK_FILE && \
+    printf "All pending changes on Task Id $SESSION_LOCK_TASK_ID are cancelled.\n" && \
+    exit 0
+  exit 1
+else
+  printf "Usage: `basename $0`
+      This script cancels all the pending edits that have so far been set
+      from within the command shell environment. No task editing session
+      has yet been started.
+"
+  exit 1
+fi
+

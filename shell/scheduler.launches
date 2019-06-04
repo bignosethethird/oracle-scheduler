@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# kill tailing process
+trap kill -9 %1 > /dev/null 2>&1 && exit INT TERM HUP EXIT
+# Start tailing the log file from NOW
+tail -0cf $APP_HOME/log/events &
+
+sqlplus -s / <<!
+set serveroutput on format wrapped
+set feedback off
+set serveroutput on size 1000000
+var i number
+exec :i:=scheduler.scheduler_con.scheduler_launches;
+quit :i
+!
+
+sleep 1 # Give time for tail to poll log file and output
+kill -9 %1 > /dev/null 2>&1 # kill tailing process

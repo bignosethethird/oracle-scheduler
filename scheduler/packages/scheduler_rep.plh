@@ -1,0 +1,95 @@
+create or replace package scheduler.scheduler_rep
+as
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Reporting functions
+-------------------------------------------------------------------------------
+
+
+--===========================================================================--
+-- GLOBAL SYSTEM-WIDE CONSTANTS
+--===========================================================================--
+pc_package                  constant varchar2(30):=  'scheduler_rep';
+pc_schema                   constant varchar2(30):=  'scheduler';
+
+gc_config_key_datetimeformat constant varchar2(30):= 'GUIDateTimeFormat';
+gc_datetime_format          varchar2(30);
+
+-------------------------------------------------------------------------------
+-- General Task query for the given search criteria
+--- group name
+--  state
+-- Description is a wild-card string. NULL --> no constraint
+-- Command is a wild-card string. NULL--> no contraint
+-- dependency is a wild-card string. NULL--> no contraint
+-- Returns:   
+--  task_id        (should be hidden)
+--  group_name
+--  operation_id
+--  task_type
+--  description (limited to 30 chars)
+--  current state
+--  when last changed
+--  next due for execution
+--  command
+--  dependencies
+-- ordered by next due date
+function get_tasks_list(
+  p_description in  schedules.description%type :=null,
+  p_command     in  schedules.command%type     :=null,
+  p_group_name  in  varchar2                   :=null,
+  p_state       in  varchar2                   :=null,
+  p_dependency  in  varchar2                   := null
+  ) return utl.global.t_result_set;
+
+------------------------------------------------------------------------------
+-- Report circular references between tasks.
+--
+-- Every time that the scheduler is started or a task is added or amended,
+-- a process checks if any tasks make circular references to one-another
+-- through their dependency expressions. All offending tasks are disabled
+-- and need to be manually resolved.
+procedure circular_tasks;
+
+-------------------------------------------------------------------------------
+-- Get english explanation of when and under which circumstances the task will run.
+--
+-- Parameters:
+--  Specify task_id
+--
+-- Returns:
+--  Verbose explanation of the task
+function  task_explanation(p_task_id in schedules.task_id%type) return varchar2;
+
+-------------------------------------------------------------------------------
+-- Task checker
+--
+-- All the tasks can manually be checked and a report generated. The following
+-- tasks aspects are checked for:
+--  * Invalid tasks
+--  * Orphaned tasks
+--  * Circular references
+-- scheduler.check_all_tasks
+procedure check_all_tasks;
+
+-- Dumps tasks content
+function task_dump(p_task_id in schedules.task_id%type) return varchar2;
+function task_dump(p_task_spec in sched.t_schedule_rec) return varchar2;
+
+-- Shows tasks content
+function task_show(p_task_id in schedules.task_id%type) return varchar2;
+function task_show(p_task_spec in sched.t_schedule_rec) return varchar2;
+
+-- Dumps all the tasks in the schedule 
+function schedule_dump return varchar2;
+-- Shows all the tasks in the schedule 
+function schedule_show return varchar2;
+-- Shows all the tasks in the schedule that partially match the
+-- given task description search string
+function schedule_query(p_search in varchar2) return varchar2;
+
+end scheduler_rep;
+-------------------------------------------------------------------------------
+-- end of file
+-------------------------------------------------------------------------------
+/

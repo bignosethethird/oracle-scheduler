@@ -1,0 +1,295 @@
+create or replace package scheduler.sched as
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Task Scheduling Mechanism
+--  DO NOT "BEAUTIFY" THIS CODE !
+--===========================================================================--
+-- GLOBAL SYSTEM-WIDE CONSTANTS
+--===========================================================================--
+pc_package                      constant varchar2(30):='sched';
+pc_schema                       constant varchar2(30):='scheduler';
+-- Scheduler modes
+gc_mode_UNQUIESCED              constant varchar2(20):='RUNNING';       -- Schedule is executing any tasks. Normal state.
+gc_mode_QUIESCING               constant varchar2(20):='SHUTTING DOWN'; -- Schedule is waiting for any current tasks to complete
+gc_mode_QUIESCED                constant varchar2(20):='SHUT DOWN';     -- Schedule is now not executing any tasks
+gc_mode_SUSPENDED               constant varchar2(20):='SUSPENDED';     -- Schedule FSM is not scanning the schedule but running tasks are still completing
+gc_mode_ABORTING                constant varchar2(20):='ABORTING';      -- Schedule FSM is not scanning the schedule and running tasks are aborted
+gc_mode_ABORTED                 constant varchar2(20):='ABORTED';       -- Scheduler has been uncleanly shut down
+gc_mode_UNKNOWN                 constant varchar2(20):='UNKNOWN';       -- Indeterminate state
+
+-- Task States:
+gc_state_INITIAL                constant varchar2(10):='INITIAL';       -- Initial state of a task when a new task is inserted to the scheduler or an existing task has been amended. When the scheduler runs, it will immediately put the task state to READY status.
+gc_state_WAITING                constant varchar2(10):='WAITING';       -- The "rest" state of a task. The task is ready and is now waiting for it to become due. If the scheduler is in the QUIESCING or QUIESCED mode, tasks in this state will not be evaluated for becoming due.
+gc_state_DUE                    constant varchar2(10):='DUE';           -- Task is due now and is waiting for its logical dependencies to be satisfied before it will be executed, in which case it will be put into the READY state and the task will be launched. If a task times out from when it is due because it's logical dependencies could not be satisfied, the task will return to its rest state.
+gc_state_READY                  constant varchar2(10):='READY';         -- This is a pre-execution state, where final code wrapping of the task's command is performed before it is launched. This is also the state that a currently-executing task is put in when recovering from a catastrophic system failure.
+gc_state_EXECUTING              constant varchar2(10):='EXECUTING';     -- Task is currently executing. When a task has successfully completed its execution, it is set to the DONE state or to ERROR, BROKEN or TIMEDOUT state if an error occurred. 
+gc_state_ABORTING               constant varchar2(10):='ABORTING';      -- The task has been instructed to terminate and the scheduler is waiting for confirmation that this has happened.
+gc_state_ABORTED                constant varchar2(10):='ABORTED';       -- The scheduler has determined that this task is not running any more, or has given up waiting for a task to terminate in the case of a zombie task.
+gc_state_SUSPENDED              constant varchar2(10):='SUSPENDED';     -- Task is suspended. It will not be executed until its SUSPENDED state has been revoked. When a task is suspended while it is executing, the task will complete its execution.
+gc_state_RESUMED                constant varchar2(10):='RESUMED';       -- A SUSPENDED task is resumed. The task is set to whatever state the task was in when it was SUSPENDED.
+gc_state_EXCLUDED               constant varchar2(10):='EXCLUDED';      -- Synonymous with a state that might be called SKIPPED. The task excluded for this coming run only. Once its execution conditions have been satisfied, it is set to DONE as if it had executed where the NEXT_DUE_DATE is calculated. The scheduler treats the task normally after this.
+gc_state_BROKEN                 constant varchar2(10):='BROKEN';        -- DBMS_JOB indicates when a task that it is responsible for could not execute, e.g. invalid SQL or a non-existing stored procedure was called. A task can also be put in this state when the task has been incorrectly specified. Such a task needs to be manually corrected before the scheduler can continue. 
+gc_state_ERROR                  constant varchar2(10):='ERROR';         -- The execution of a task resulted in a non-zero return code. Other tasks dependent on this task will not execute until this task has been reset.
+gc_state_RETRY                  constant varchar2(10):='RETRY';         -- A PERSISTENT task is being retried by the scheduler. The task remains in this state for the duration of the REPEAT_INTERVAL, specified in minutes.
+gc_state_TIMEDOUT               constant varchar2(10):='TIMEDOUT';      -- Task timed out based on its dependency timeout criterion, or because its execution timeout criterion expired. A task in this state will remain in this state until manually reset to the READY state.
+gc_state_DONE                   constant varchar2(10):='DONE';          -- Task successfully completed. Any tasks that are dependent on this task use this state in their dependency evaluation. Where the next date due could not be calculated, the task is set to the DISABLED state. In special cases, a completed task will be removed from the schedule when in this state.
+gc_state_DISABLED               constant varchar2(10):='DISABLED';      -- Task has been disabled since no next due time could not be calculated, e.g. when it was a one-off task. It can also manually be disabled. A disabled task is resumed by putting it in the INITIAL state.
+gc_state_UNDEFINED              constant varchar2(10):='UNDEFINED';     -- Undefined state. This suggests implementation problems or undue manual interference with the scheduler. The scheduler ignores tasks in this state and such tasks need to be manually resolved.
+gc_state_EDIT_LOCK              constant varchar2(10):='EDIT_LOCK';     -- The task is locked while it is being edited. On completion of editing, if any changes are made to the tasks, the task state is set to INITIAL. If not changes were made, the task is state is returned to its original state.  
+
+-- Dealing with Special Days
+gc_special_day_INCLUDE          constant varchar2(7) :='INCLUDE';
+gc_special_day_EXCLUDE          constant varchar2(7) :='EXCLUDE';
+gc_special_day_ONLY             constant varchar2(7) :='ONLY';
+gc_special_day_AFTER            constant varchar2(7) :='AFTER';
+gc_special_day_BEFORE           constant varchar2(7) :='BEFORE';
+
+-- Whatever you wnat to call a 'special day' in the schedule report
+gc_special_day_name             constant varchar2(20):='public holiday';
+
+-- Types of TASKS
+gc_type_DURABLE                 constant varchar2(12):='DURABLE';
+gc_type_PERSISTENT              constant varchar2(12):='PERSISTENT';
+gc_type_VOLATILE                constant varchar2(12):='VOLATILE';
+gc_type_TIMECRITICAL            constant varchar2(12):='TIMECRITICAL';
+
+-- Types of COMMANDS
+gc_command_type_SQL             constant varchar2(12):= 'SQL';
+gc_command_type_FUNCTION        constant varchar2(12):= 'FUNCTION';
+gc_command_type_PROCEDURE       constant varchar2(12):= 'PROCEDURE';
+gc_command_type_EXTERNAL_PROC   constant varchar2(12):= 'SHELL';
+
+-- Default group name
+gc_default_group_name           constant varchar2(20):= 'DEFAULT';
+
+-- Extents
+gc_max_executing_tasks          constant pls_integer := 999;
+
+-- Config Variable Names:
+gc_config_status_key            constant varchar2(30):= 'SchedulerStatus';
+gc_config_scan_int_key          constant varchar2(30):= 'SchedulerFSMScanningInterval';
+gc_config_scan_duration_key     constant varchar2(30):= 'SchedulerFSMScanDuration';
+gc_config_rety_int_key          constant varchar2(30):= 'SchedulerRetryInterval';
+gc_config_state_change_key      constant varchar2(30):= 'SchedulerStateChange';
+gc_config_abort_int_key         constant varchar2(30):= 'SchedulerTaskAbortInterval';
+gc_config_edit_timeout_key      constant varchar2(30):= 'SchedulerTaskEditTimeout';
+gc_config_last_shutdown_key     constant varchar2(30):= 'SchedulerLastShutdown';
+gc_config_last_startup_key      constant varchar2(30):= 'SchedulerLastStartup';
+gc_config_last_fsm_scan_key     constant varchar2(30):= 'SchedulerLastScan';
+gc_config_artifical_date_key    constant varchar2(30):= 'SchedulerArtificialDate';
+gc_config_log_file_key          constant varchar2(30):= 'SchedulerLogfile';
+gc_config_temp_dir_key          constant varchar2(30):= 'SchedulerTempDir';
+gc_config_max_tasks_key         constant varchar2(30):= 'SchedulerMaxTasks';
+
+-- Dynamic Parameter identifyers and formats
+gc_dyn_parm_effective_date      constant varchar2(30):= '<EffectiveDate>';
+gc_dyn_form_effective_date      constant varchar2(30):= 'YYYYMMDD';
+
+--===========================================================================--
+-- GLOBAL TYPES
+--===========================================================================--
+subtype t_schedule_rec      is vw_fsm_tasks%rowtype;
+
+type    t_schedules         is table of t_schedule_rec index by binary_integer;
+
+--===========================================================================--
+-- PUBLIC FUNCTIONS
+--===========================================================================--
+
+-------------------------------------------------------------------------------
+-- FSM Control Functions:
+-------------------------------------------------------------------------------
+-- Initialises the FSM
+-- This function needs to be set up as a trigger:
+-- create or replace trigger db_startup after startup on database
+-- begin
+--   utl.scheduler.init_fsm;
+-- end;
+-- /
+procedure init_fsm;
+
+-- Clear any previous instances of the schedule FSM
+-- This function needs to be set up as a trigger:
+-- create or replace trigger db_startup before shutdown on database
+-- begin
+--   utl.scheduler.kill_fsm;
+-- end;
+-- /
+procedure kill_fsm;
+
+-- TRUE if FSM is running
+function is_fsm_running return boolean;
+
+-------------------------------------------------------------------------------
+-- Scheduler Control Functions:
+-------------------------------------------------------------------------------
+-- Starts the scheduler after it has been shut down
+-- Adds the FSM to the dbms_job queue after removing any previous entry
+procedure startup;
+
+-- Stops the scheduler
+-- Suspends the FSM in the dbms_job queue
+procedure shutdown;
+
+-- Get the state of the scheduler
+function status return varchar2;
+
+-- Stops the scheduler FSM only. The effect of this is that an executing
+-- task will not be recognised as having completed when it does, and that a
+-- task that becomes due will not be launched.
+-- The Procedure version outputs the result to DBMS_OUTPUT
+procedure suspend;
+
+-- This restarts the scheduler FSM only. Any tasks that may have become due
+-- while the scheduler was suspended are executed.
+-- The Procedure version outputs the result to DBMS_OUTPUT
+procedure resume;
+
+-- An attempt can be made to abruptly halt the entire schedule. This will
+-- summarily terminate all tasks where possible and stop the FSM. The effect
+-- is the same as when the Oracle instance and the server is hard shut down.
+-- The results are unpredictable.
+procedure abort;
+
+-------------------------------------------------------------------------------
+-- Task Control Functions:
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+-- FSM Controller
+-- This procedure should be called 10 seconds by DBMS_JOB,
+-- and determines the FSM state for all batch jobs.
+-- It is typically set up in DBMS_JOB as follows:
+-- v_job pls_integer;
+-- dbms_job.submit(v_job,UTL.scheduler.fsm,sydate,'sysdate+10/(60*1440)');
+procedure fsm;
+
+-------------------------------------------------------------------------------
+-- The following functions evaluate and retreive the states of Tasks.
+-------------------------------------------------------------------------------
+-- Get task details
+-- Parameters:
+--  Specify task_id in p_task_spec
+--  All task parameters returned in p_task_spec
+-- Returns:
+--  0 on success
+--  gc_scheduler_task_exist if task does not exist
+function get_task_details(p_task_spec in out t_schedule_rec) return UTL.global.t_error_code;
+
+-- Gets the state of a task
+function get_task_state(p_task_id in schedules.task_id%type) return schedules.state%type;
+
+-- Set the state of a task
+-- Returns:
+--  Success: Task is put in DUE state
+--  Failure: invalid task specified
+procedure set_task_state(p_task_spec     in  out  t_schedule_rec,
+                         p_desired_state in  schedules.state%type,
+                         p_ref_date      in  date:=sysdate,
+                         p_next_due_date in  date:=null);
+
+-- Gets previous state of a task
+function get_task_previous_state(p_task_id in schedules.task_id%type) return schedules.state%type;
+
+-------------------------------------------------------------------------------
+-- Get the task Id for the friendly group name and operation Id
+function  get_task_ids(p_group_name in schedules.group_name%type,
+                       p_operation_id in schedules.operation_id%type) return dbms_sql.Number_Table;
+
+-- Checks if the task has completed by the arrival of a non-null value in  in the RETURN_CODE field
+function get_completion_state(p_task_spec in t_schedule_rec, p_ref_date in date) return utl.global.t_error_code;
+
+-- Get the number of executing tasks.
+function get_num_executing_tasks return pls_integer;
+                       
+-- Checks if a job is due to be executed.
+function is_task_due(p_task_spec in t_schedule_rec,p_sysdate in date) return boolean;
+
+-- Determines if a job has been running too long after it has started to execute
+-- based on the max_runtime value specified in minutes.
+-- Return gc_success                        if not timed out
+--        gc_scheduler_job_too_long    if timed out
+function is_task_run_too_long(p_task_spec in t_schedule_rec, p_sysdate in date) return UTL.global.t_error_code;
+
+-- Checks if the task has completed by the appearance of a non-null value in 
+-- in the RETURN_CODE field
+-- Returns gc_succcess if the task has completed, e.g. it is not there any more
+-- Returns gc_scheduler_task_busy if job still busy executing
+-- Returns gc_scheduler_task_broken if there was problem.
+-- Checks if the OS process is still runnning
+-- This function does not set any states.
+-- Returns SUCCESS if the job has completed
+-- Returns gc_scheduler_task_busy if job still busy executing
+function is_os_process_done(p_task_spec in t_schedule_rec, p_ref_date in date) return utl.global.t_error_code;
+
+-- Checks if the Oracle process is still runnning
+-- This function does not set any states.
+-- Returns: gc_success             if the job has completed, because either:
+--            * No PID was registered since the task executed so quickly
+--            * No trace of the job could be found in the `ps` command
+--          gc_scheduler_task_busy if job still busy executing
+function is_sql_process_done(p_task_spec in t_schedule_rec) return utl.global.t_error_code;
+
+-- Checks if task is modal
+function is_task_modal(p_task_spec in t_schedule_rec) return boolean;
+
+-- Checks if any modal tasks are running are running
+function is_modal_task_running(p_task_spec in t_schedule_rec) return boolean;
+
+-- Checks if any tasks (modal or not) are running at all
+function is_any_task_executing return boolean;
+
+-- Substitute with configuration variables and environment values
+procedure fit_unix_environment(p_cmd in out varchar2);
+
+-- Makes up the sql code to run the job and submit it to the dbms_job queue.
+-- The JOB column is updated to the job number that DBMS_JOB
+-- assigned to the job when it was submitted and a local Task launch Id is 
+-- assigned to the task execution. This is of the same cardinality as that of
+-- the job Id returned from dbms_job.submit, but this Id is only known after 
+-- the job is actually submitted to dbms_job, so is useless for what we need 
+-- to do here. Our own execution Id is returned p_task_lauch_id.
+--
+-- Returns SUCCESS if the job has completed.
+-- Returns gc_scheduler_task_submit job submission failed
+function submit_task(p_task_spec in out t_schedule_rec, p_fsm_date in date) return UTL.global.t_error_code;
+
+------------------------------------------------------------------------
+-- The following function are called from the wrapper code when 
+-- running inside a DBMS_JOB:
+------------------------------------------------------------------------
+
+-- Calculates the next date
+function get_next_repeat_time(p_task_id in scheduler.schedules.task_id%type) return date;
+
+-- Update the PID of the task for external procedures
+procedure update_task_pid(p_task_id      in schedules.task_id%type,
+                          p_execution_id in varchar2,
+                          p_process_id   in varchar2);
+
+-- Update the return code of the task for external procedures
+procedure update_task_return_code(p_task_id      in schedules.task_id%type,
+                                  p_execution_id in task_log.execution_id%type,
+                                  p_return_code  in schedules.return_code%type);
+
+-- Update the number of counts so far executed for a repeating task
+-- This is only used for monitoring the DBMS_JOB repeats of the tasks
+-- and not for controlling it - this is done by DBMS_JOB.
+-- This function is called by the code that is submitted to DBMS_JOB
+procedure increment_task_repeat_count(p_task_id  in schedules.task_id%type,
+                                      p_execution_id in task_log.execution_id%type);
+
+-- Gets the next execution Id for the task when it executes
+function get_next_execution_id return pls_integer;
+
+-- Removes a job from the DBMS_JOB queue, either because it is was flawed 
+-- or because it its repeating executions were all done.
+procedure safe_job_remove(p_job_id in schedules.queue_id%type);
+
+procedure tx_heartbeat(p_msg in varchar2:=null);
+
+end sched;
+-------------------------------------------------------------------------------
+-- end of file
+-------------------------------------------------------------------------------
+/

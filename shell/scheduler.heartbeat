@@ -1,0 +1,20 @@
+#!/usr/bin/bash
+# Dipslays the scheduler heartbeat, which would be one '*' per scheduler FSM cycle.
+# If the scheduler is not running, then nothing appears.
+#
+[[ -z $APP_HOME ]] && printf "\$APP_HOME has not been defined. Exiting...\n" && exit 1
+
+# Check if there already is an instance of this script running
+#BASENAME=${0##*/}
+#ps -ef  > /dev/null     # Force a refresh
+#if [[ $(ps -ef | grep $BASENAME | grep -v grep | grep $LOGNAME | wc -l) -gt 1 ]]; then
+#  print "An instance of $BASENAME is already running.\nExiting...\n"
+#  exit 1
+#else
+#  rm -f $APP_HOME/log/heartbeat > /dev/null 2>&1
+#  touch $APP_HOME/log/heartbeat > /dev/null 2>&1
+#  chmod 777 $APP_HOME/log/heartbeat > /dev/null 2>&1
+#fi
+
+printf "Listening to the Scheduler's heartbeat (Ctrl-C to exit):\n"
+tail -f $APP_HOME/log/heartbeat

@@ -1,0 +1,28 @@
+create or replace package scheduler.scheduler_val as
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Task Validating
+--  DO NOT "BEAUTIFY" THIS CODE !
+--===========================================================================--
+-- GLOBAL SYSTEM-WIDE CONSTANTS
+--===========================================================================--
+pc_package                      constant varchar2(30):='sched';
+pc_schema                       constant varchar2(30):='scheduler_val';
+
+-- Validate date
+function validate_date(p_task_spec in sched.t_schedule_rec) return utl.global.t_error_code;
+
+-- Validate task specification
+-- Returns gc_success of the task is accepted.
+function validate_task(p_task_spec in out sched.t_schedule_rec) return utl.global.t_error_code;
+
+-- Prettify by adding periods in where days are missing
+-- 2346 ---> .234.6.
+function prettify_weekdays(p_weekdays in varchar2) return varchar2;
+
+
+end scheduler_val;
+-------------------------------------------------------------------------------
+-- end of file
+-------------------------------------------------------------------------------
+/

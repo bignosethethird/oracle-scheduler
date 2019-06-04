@@ -1,0 +1,278 @@
+create or replace package scheduler.scheduler_mod
+as
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- Interaction with the Scheduler data
+-- DO NOT BEAUTIFY THIS CODE!!!!!!!
+-------------------------------------------------------------------------------
+
+--===========================================================================--
+-- GLOBAL SYSTEM-WIDE CONSTANTS
+--===========================================================================--
+pc_package                  constant varchar2(30):=  'scheduler_mod';
+pc_schema                   constant varchar2(30):=  'scheduler';
+-- Marker used to indeicate that a task is being inserted
+gc_insert_task_id           constant pls_integer :=  1;
+
+gc_adhoc_load_default       constant integer := 1;
+gc_adhoc_load_version_oride constant integer := 2;
+gc_adhoc_load_specific_file constant integer := 3;
+
+gc_adhoc_load_command_cf_key constant varchar2(50) := 'app.adhoc_load_command';
+gc_config_key_datetimeformat constant varchar2(30) := 'LogDateFormat';
+--===========================================================================--
+-- GLOBAL SESSION-WIDE VARIABLES
+--===========================================================================--
+-- Temporary editing space
+gv_edit_schedule_rec        sched.t_schedule_rec;
+-- Set to the task Id currently being editted in this session
+gv_session_task_edit_lock   schedules.task_id%type:=null;
+-- Display of date format
+gc_datetime_format          varchar2(30);
+
+--===========================================================================--
+-- PRIVATE FUNCTIONS - uncomment for unit test only
+--===========================================================================--
+--procedure init_workspace(p_task_spec in out scheduler.t_schedule_rec);
+--function  set_task_attr(p_task_spec in scheduler.t_schedule_rec) return utl.global.t_error_code;
+--function  add_task(p_task_spec in scheduler.t_schedule_rec) return UTL.global.t_error_code;
+
+--===========================================================================--
+-- PUBLIC FUNCTIONS
+--===========================================================================--
+
+-- Assign this task to the session
+procedure set_session_lock(p_task_id in schedules.task_id%type);
+-- Un-Assign this task to the session
+procedure release_session_lock;
+
+-- Edit an exisintg task
+procedure task_edit(
+  p_task_id           in schedules.task_id%type,
+  p_submitted_by      in schedules.submitted_by%type:=null,
+  p_task_type         in schedules.task_type%type:=null,
+  p_task_priority     in schedules.task_priority%type:=null,
+  p_task_peers        in varchar2:=null,
+  p_group_name        in schedules.group_name%type:=null,
+  p_group_priority    in task_groups.group_priority%type:=null,
+  p_operation_id      in schedules.operation_id%type:=null,
+  p_command           in schedules.command%type:=null,
+  p_command_type      in schedules.command_type%type:=null,  
+  p_description       in schedules.description%type:=null,
+  p_dependencies      in schedules.dependencies%type:=null,
+  p_max_waittime      in schedules.max_waittime%type:=null,
+  p_max_runtime       in schedules.max_runtime%type:=null,
+  p_year              in schedules.year%type:=null,
+  p_month             in schedules.month%type:=null,
+  p_day               in schedules.day%type:=null,
+  p_hour              in schedules.hour%type:=null,
+  p_minute            in schedules.minute%type:=null,
+  p_weekdays          in schedules.weekdays%type:=null,
+  p_special_days      in schedules.special_days%type:=null,
+  p_next_due_date     in schedules.next_due_date%type:=null,
+  p_repeats           in schedules.repeats%type:=null,
+  p_repeat_interval   in schedules.repeat_interval%type:=null,
+  p_repeat_periodic   in schedules.repeat_periodic%type:=null,
+  p_effective_date_offset in schedules.effective_date_offset%type:=null,
+  p_modal             in schedules.modal%type:=null,
+  p_ignore_error      in schedules.ignore_error%type:=null,
+  p_change_reason     in schedules.change_reason%type:=null
+);
+
+-------------------------------------------------------------------------------
+-- Edit attributes of an existing task
+-- This function can be called multiple times during an editing session.
+-- Update only those attributes that have not changed on this function call - 
+--  this allows the function to be repeatedly called during an edit session.
+procedure  set_task_attr(
+  p_submitted_by      in schedules.submitted_by%type:=null,
+  p_task_type         in schedules.task_type%type:=null,
+  p_task_priority     in schedules.task_priority%type:=null,
+  p_group_name        in schedules.group_name%type:=null,
+  p_operation_id      in schedules.operation_id%type:=null,
+  p_command           in schedules.command%type:=null,
+  p_command_type      in schedules.command_type%type:=null,  
+  p_description       in schedules.description%type:=null,
+  p_dependencies      in schedules.dependencies%type:=null,
+  p_max_waittime      in schedules.max_waittime%type:=null,
+  p_max_runtime       in schedules.max_runtime%type:=null,
+  p_year              in schedules.year%type:=null,
+  p_month             in schedules.month%type:=null,
+  p_day               in schedules.day%type:=null,
+  p_hour              in schedules.hour%type:=null,
+  p_minute            in schedules.minute%type:=null,
+  p_weekdays          in schedules.weekdays%type:=null,
+  p_special_days      in schedules.special_days%type:=null,
+  p_next_due_date     in schedules.next_due_date%type:=null,
+  p_repeats           in schedules.repeats%type:=null,
+  p_repeat_interval   in schedules.repeat_interval%type:=null,
+  p_repeat_periodic   in schedules.repeat_periodic%type:=null,
+  p_effective_date_offset in schedules.effective_date_offset%type:=null,
+  p_modal             in schedules.modal%type:=null,
+  p_ignore_error      in schedules.ignore_error%type:=null,
+  p_change_reason     in schedules.change_reason%type:=null
+);
+-- Edit attributes of an existing task
+procedure set_task_attr(p_task_spec in sched.t_schedule_rec);
+
+-------------------------------------------------------------------------------
+-- Commits changes and releases a Lock on a task that was edited
+procedure  edit_commit;
+
+-------------------------------------------------------------------------------
+-- Cancels changes and releases a Lock on a task that was edited
+procedure edit_cancel;
+
+-------------------------------------------------------------------------------
+-- Begin the inserting of new task
+-- Inserting a new task is similar to editing a task, except that we do not 
+-- yet have a task Id, so we hold a notional one of -1. Only when we update 
+-- and commit the task is the task inserted to the schedule. The inserting 
+-- operation can be cancelled.
+--
+-- It is not possible to insert a task during a session while an edit session
+-- is in progress.
+--procedure insert_begin;
+
+-------------------------------------------------------------------------------
+-- Removes task from scheduler
+--
+-- Parameters:
+--  Specify task_id in p_task_id
+procedure  task_delete(p_task_id in schedules.task_id%type);
+
+-- Checks if a task is editable
+-- Returns:   TRUE if can edit lock *could* be gotten
+function is_task_editable(p_task_id in schedules.task_id%type) return boolean;
+function is_task_editable(p_task_spec in sched.t_schedule_rec) return boolean;
+function is_session_edit_locked return boolean;
+function get_session_lock return schedules.task_id%type;
+function get_session_lock_task return sched.t_schedule_rec;
+
+-------------------------------------------------------------------------------
+-- Suspend task, causing the task and any dependent tasks not to execute.
+-- If the tasks is already running, the tasks will, however, complete.
+function task_suspend(p_task_id in schedules.task_id%type) return utl.global.t_error_code;
+
+-------------------------------------------------------------------------------
+-- Resume task if it was in SUSPENDED state
+-- The Procedure version outputs the result to DBMS_OUTPUT
+function task_resume(p_task_id in schedules.task_id%type) return utl.global.t_error_code;
+
+-------------------------------------------------------------------------------
+-- Disable task, regardless of the state of the task
+function task_disable(p_task_id in schedules.task_id%type) return utl.global.t_error_code;
+
+-------------------------------------------------------------------------------
+-- Reset a hung task to the READY state
+function task_reset(p_task_id in schedules.task_id%type) return utl.global.t_error_code;
+
+-------------------------------------------------------------------------------
+-- Set the task to pre-launch regardless of constraints
+function task_run_now(p_task_id in schedules.task_id%type) return utl.global.t_error_code;
+
+-- Forwards a task to the next due date
+-- Returns a list of all tasks that were forwarded
+function task_forward(p_task_id in schedules.task_id%type,p_date_due out date) return sched.t_schedules;
+
+-- Aborts the currently-running task
+function task_abort(p_task_id  in schedules.task_id%type, p_ref_date in date:=sysdate) return utl.global.t_error_code;
+function task_abort(p_task_spec in  sched.t_schedule_rec, p_ref_date in date:=sysdate) return utl.global.t_error_code;
+
+
+-- Adds a task to the schedule
+function task_add(
+  p_submitted_by      in schedules.submitted_by%type:=null,
+  p_task_type         in schedules.task_type%type:=null,
+  p_task_priority     in schedules.task_priority%type:=null,
+  p_task_peers        in varchar2:=null,
+  p_group_name        in schedules.group_name%type:=null,
+  p_group_priority    in task_groups.group_priority%type:=null,
+  p_operation_id      in schedules.operation_id%type:=null,
+  p_command           in schedules.command%type:=null,
+  p_command_type      in schedules.command_type%type:=null,  
+  p_description       in schedules.description%type:=null,
+  p_dependencies      in schedules.dependencies%type:=null,
+  p_max_waittime      in schedules.max_waittime%type:=null,
+  p_max_runtime       in schedules.max_runtime%type:=null,
+  p_year              in schedules.year%type:=null,
+  p_month             in schedules.month%type:=null,
+  p_day               in schedules.day%type:=null,
+  p_hour              in schedules.hour%type:=null,
+  p_minute            in schedules.minute%type:=null,
+  p_weekdays          in schedules.weekdays%type:=null,
+  p_special_days      in schedules.special_days%type:=null,
+  p_next_due_date     in schedules.next_due_date%type:=null,
+  p_repeats           in schedules.repeats%type:=null,
+  p_repeat_interval   in schedules.repeat_interval%type:=null,
+  p_repeat_periodic   in schedules.repeat_periodic%type:=null,
+  p_effective_date_offset in schedules.effective_date_offset%type:=null,
+  p_modal             in schedules.modal%type:=null,
+  p_ignore_error      in schedules.ignore_error%type:=null,
+  p_change_reason     in schedules.change_reason%type:=null,
+  p_commit            in boolean := true
+) return schedules.task_id%type;
+
+-- Adds a task to the schedule
+-- Returns the resulting task_id
+function task_add(p_task_spec in out sched.t_schedule_rec,
+                  p_task_peers        in varchar2:=null,
+                  p_group_priority    in task_groups.group_priority%type:=null,
+                  p_commit    in boolean := true) return schedules.task_id%type;
+            
+-- Insert or Update task peer values for the given comma-delimited 
+-- list of task Id's
+procedure task_peers(    p_task_id in schedules.task_id%type, 
+                         p_task_peers in varchar2, 
+                         p_commit boolean:=true);
+
+-------------------------------------------------------------------------------
+-- GROUP MODIFICATION
+-------------------------------------------------------------------------------
+
+-- Inserts or updates task group's priority
+procedure group_priority(p_group_name task_groups.group_name%type,
+                         p_priority   task_groups.group_priority%type:=0,
+                         p_commit boolean:=true);
+
+-- Peers task groups
+procedure group_peers(p_group_name in task_groups.group_name%type,
+                      p_group_peers in varchar2,
+                      p_commit boolean:=true);
+
+
+
+-------------------------------------------------------------------------------
+-- AD HOC MODS
+-------------------------------------------------------------------------------
+        
+-- Artificially add peer groups against this task group for all task groups 
+-- that contain the same name as that of the file source, e.g. BOB                    
+-- These items are removed from the task_group_peers once all the tasks have
+-- completed executing.
+procedure peer_groups_by_name(p_group_name  in  task_groups.group_name%type,
+                              p_source_name in  varchar2);
+        
+-- Create and schedule one-off task to load a file or files on a adhoc basis
+-- Parameters:
+-- p_type (1 default, 2 version over-ride, 3 specific file(s)
+-- p_source_name mandatory
+-- p_as_of_date  mandatory
+-- p_basis       mandatory
+-- p_version     mandatory for type 2
+-- p_file        mandatory for type 3
+-- p_source_file_type mandatory for type 3
+-- Returns: any error code explicitly trapped during the process or success
+function schedule_adhoc_file_load(p_type             in integer,
+                                   p_source_name      in varchar2,
+                                   p_as_of_date       in date,
+                                   p_basis            in varchar2,
+                                   p_version          in varchar2,
+                                   p_file             in varchar2,
+                                   p_source_file_type in varchar2) return utl.global.t_error_code;
+                                   
+end scheduler_mod;
+-------------------------------------------------------------------------------
+-- end of file
+-------------------------------------------------------------------------------
+/

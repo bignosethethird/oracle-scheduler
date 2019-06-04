@@ -1,0 +1,202 @@
+create or replace package scheduler.scheduler_con
+as
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- CONSOLE to the Task Scheduler
+-- Functions return on Sucsess and non-0 on an error
+--
+-- DO NOT BEAUTIFY THIS CODE!!!!!!!
+-------------------------------------------------------------------------------
+
+--===========================================================================--
+-- GLOBAL SYSTEM-WIDE CONSTANTS
+--===========================================================================--
+pc_package                  constant varchar2(30):=  'scheduler_con';
+pc_schema                   constant varchar2(30):=  'scheduler';
+
+gc_config_key_datetimeformat constant varchar2(30):= 'GUIDateTimeFormat';
+gc_datetime_format          varchar2(30);
+
+--===========================================================================--
+-- DATA DUMP and MONITORING FUNCTIONS
+--===========================================================================--
+
+-- Ouput usually very long error details to dbms_output in nice lines
+procedure dump_error_details(p_error_code in utl.error_codes.error_code%type);
+
+-- Output all the schedules
+function scheduler_dump return pls_integer;
+
+-- Output all the schedules
+function scheduler_show return pls_integer;
+
+-- General Schedule query: Select tasks that match the Description, state, 
+-- group or command fields with the search string
+function scheduler_query(p_search in schedules.description%type :=null) return pls_integer;
+
+-- Get a process log of last 100 events related to the scheduler
+function scheduler_errors  return pls_integer;
+
+-- Shows last 100 task launches
+function scheduler_launches return pls_integer;
+
+--===========================================================================--
+-- SCHEDULER CONTROL
+--===========================================================================--
+
+-------------------------------------------------------------------------------
+-- Scheduler command and control
+--
+-- Returns the following and should be displayed with the corresponding colour.
+-- Only the Buttons shown should be enabled for a state.
+-- 'RUNNING'            Green         Abort, Suspend, Shutdown
+-- 'SHUTTING DOWN';     Orange        Abort
+-- 'SHUT DOWN';         Red           Startup
+-- 'SUSPENDED';         Yellow        Resume, Abort
+-- 'ABORTING';          Orange        (None)
+-- 'ABORTED';           Red           Startup
+-- 'UNKNOWN';           Blue          Startup
+--
+-- Called:    * This function should regularly be called while the scheduler
+--              control screen is being viewed
+--            * When the REFRESH BUTTON is clicked (even though it relates to
+--              the scheduler log)
+function scheduler_startup return pls_integer;
+function scheduler_shutdown return pls_integer;
+function scheduler_status  return pls_integer;
+function scheduler_resume return pls_integer;
+function scheduler_suspend return pls_integer;
+function scheduler_abort  return pls_integer;
+function scheduler_kill  return pls_integer;
+function scheduler_init  return pls_integer;
+  
+--===========================================================================--
+-- TASK CONTROL
+--===========================================================================--
+
+-- Runs the selected task now
+-- Parameters:  Primary Key Task Id
+-- Returns:     A non-success return code means that it was impossible
+--              to lauch the task, or if more than one task was selected,
+--              one or more task launches failed.
+function task_run(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Delete the task.
+--
+-- Parameters:  Primary Key Task Id
+--              Comma-separated string of Task Id's if multiple tasks selected.
+-- Returns:     A non-success return code means that it was impossible
+--              to remove the task from the schedule
+function task_delete(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- English explanation
+function task_explain(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Suspend task, causing the task and any dependent tasks not to execute.
+function task_suspend(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Resume task if it was in SUSPENDED state
+function task_resume(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Disable task, regardless of the state of the task
+function task_disable(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Reset a hung task to the READY state
+function task_reset(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Aborts a currenly-running task
+function task_abort(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Forwards a task to the next due date
+function task_forward(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Alters and commits all changes to an existing task
+function task_alter(
+  p_task_id           in schedules.task_id%type,
+  p_submitted_by      in varchar2:=null,
+  p_task_type         in varchar2:=null,
+  p_task_priority     in varchar2:=null,  
+  p_task_peers        in varchar2:=null,
+  p_group_name        in varchar2:=null,
+  p_group_priority    in varchar2:=null,
+  p_operation_id      in varchar2:=null,
+  p_command           in varchar2:=null,
+  p_command_type      in varchar2:=null,
+  p_description       in varchar2:=null,
+  p_dependencies      in varchar2:=null,
+  p_max_waittime      in varchar2:=null,
+  p_max_runtime       in varchar2:=null,
+  p_year              in varchar2:=null,
+  p_month             in varchar2:=null,
+  p_day               in varchar2:=null,
+  p_hour              in varchar2:=null,
+  p_minute            in varchar2:=null,
+  p_weekdays          in varchar2:=null,
+  p_special_days      in varchar2:=null,
+  p_next_due_date     in varchar2:=null,
+  p_repeats           in varchar2:=null,
+  p_repeat_interval   in varchar2:=null,
+  p_repeat_periodic   in varchar2:=null,  
+  p_effective_date_offset in varchar2:=null,
+  p_modal             in varchar2:=null,  
+  p_ignore_error      in varchar2:=null,
+  p_change_reason     in varchar2:=null  
+) return pls_integer;
+
+-- Adds a new task to the schedule
+-- The task Id is internally generated.
+function task_add(
+  p_submitted_by      in schedules.submitted_by%type:=null,
+  p_task_type         in schedules.task_type%type:=null,
+  p_task_priority     in schedules.task_priority%type:=null,
+  p_task_peers        in varchar2:=null,
+  p_group_name        in schedules.group_name%type:=null,
+  p_group_priority    in task_groups.group_priority%type:=null,
+  p_operation_id      in schedules.operation_id%type:=null,
+  p_command           in schedules.command%type:=null,
+  p_command_type      in schedules.command_type%type:=null,
+  p_description       in schedules.description%type:=null,
+  p_dependencies      in schedules.dependencies%type:=null,
+  p_max_waittime      in schedules.max_waittime%type:=null,
+  p_max_runtime       in schedules.max_runtime%type:=null,
+  p_year              in schedules.year%type:=null,
+  p_month             in schedules.month%type:=null,
+  p_day               in schedules.day%type:=null,
+  p_hour              in schedules.hour%type:=null,
+  p_minute            in schedules.minute%type:=null,
+  p_weekdays          in schedules.weekdays%type:=null,
+  p_special_days      in schedules.special_days%type:=null,
+  p_next_due_date     in schedules.next_due_date%type:=null,
+  p_repeats           in schedules.repeats%type:=null,
+  p_repeat_interval   in schedules.repeat_interval%type:=null,
+  p_repeat_periodic   in schedules.repeat_periodic%type:=null,
+  p_effective_date_offset in schedules.effective_date_offset%type:=null,
+  p_modal             in schedules.modal%type:=null,
+  p_ignore_error      in schedules.ignore_error%type:=null,
+  p_change_reason     in schedules.change_reason%type:=null
+) return pls_integer;
+
+-- Show the task content
+function task_show(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Dumps the task content
+function task_dump(p_task_id in schedules.task_id%type) return pls_integer;
+
+-- Insert or Update task peer values for the given comma-delimited 
+-- list of task Id's
+function task_peers(p_task_id in schedules.task_id%type, 
+                    p_task_peers in varchar2) return pls_integer;
+
+-- Inserts or updates task group's priority
+function group_priority(p_group_name task_groups.group_name%type,
+                        p_priority   task_groups.group_priority%type) return pls_integer;
+
+-- Peers task groups for the given comma-delimited list of group names
+function group_peers(p_group_name task_group_peers.group_peer1%type,
+                    p_group_peers varchar2) return pls_integer;
+                                                
+end scheduler_con;
+-------------------------------------------------------------------------------
+-- end of file
+-------------------------------------------------------------------------------
+/

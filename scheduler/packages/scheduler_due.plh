@@ -1,0 +1,72 @@
+create or replace package scheduler.scheduler_due
+as
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+-- DO NOT "BEAUTIFY" THIS CODE LEST YOU BE SHOT AT DAWN.
+--
+-- Due Date calculations for the scheduler
+-------------------------------------------------------------------------------
+
+--===========================================================================--
+-- GLOBAL SYSTEM-WIDE CONSTANTS
+--===========================================================================--
+pc_package                  constant varchar2(30):=  'scheduler_due';
+pc_schema                   constant varchar2(30):=  'scheduler';
+
+--===========================================================================--
+-- PRIVATE FUNCTIONS
+--===========================================================================--
+
+-- Calculate the closest date to the reference date for a given granularity.
+-- The degree of granularisation is determined by the smallest-size item in 
+-- the recurring pattern.
+-- The date elements are zero-padded strings.
+-- All values need to be zero-padded to 2 or 4 characters
+function granularize_date(p_ref_date in date, 
+                          p_year  in varchar2,
+                          p_month in varchar2,
+                          p_day   in varchar2,
+                          p_hour  in varchar2,
+                          p_min   in varchar2)
+return date;
+
+--===========================================================================--
+-- PUBLIC FUNCTIONS
+--===========================================================================--
+
+-- Calculate and return the next date that the task is due using repeat pattern
+-- based on the given reference date
+--
+-- Note:
+--   If no date parameters are specified, then it will increment to the next minute.
+--   unless the task has depencies, which case the task should execute as soon as the 
+--   dependencies are satisfied. In this case, this function return NULL 
+--   so that the NEXT_DUE_DATE should be set to NULL.
+--
+-- Returns:  next due date if it could be calculated with success code
+--           null if not possible to calculate or if  with an error code
+--           no date has been specified and thetask has dependencies with success code
+function calc_next_due_date(p_task_spec in sched.t_schedule_rec, 
+                            p_ref_date in date, 
+                            p_due_date out date) return UTL.global.t_error_code;
+                            
+-- Calculates the effective as-of-date from the given task's effective_date_offset
+-- based on the most recent next_date_due value (or FSM date is not yet available)
+-- We consider days-of-week if defined and walk forward  (offset is a positive value)
+--                                      or walk backward (offset is a negative value)
+--                                     until a matching weekday is reached.
+-- Returns the calculated date.
+-- If effective_date_offset is not defined or 0, return a NULL date
+function calc_dynamic_effective_date(p_task_spec in sched.t_schedule_rec, p_fsm_date in date) return date;
+
+-- Calculate dynamic values for previously agreed identifyers and implementations
+-- Procedures like this should ideally be pluggable into this scheduler package
+-- as more types of dynamic variables are added to the system, but this is not 
+-- supported by PL/SQL. So we follow the recipe outlined below: 
+procedure calc_dynamic_values(p_task_spec in out sched.t_schedule_rec, p_fsm_date in date := null);
+
+end scheduler_due;
+-------------------------------------------------------------------------------
+-- end of file
+-------------------------------------------------------------------------------
+/

@@ -1,0 +1,10 @@
+#!/usr/bin/bash
+# Reset all the task in the scheduler that are in the BROKEN and ERROR state.
+
+[[ -z $APP_HOME ]] && printf "
+\$APP_HOME is not defined.
+Exiting...
+" && exit 1
+
+for i in $(scheduler.dump | egrep "(ERROR)|(BROKEN)" | cut -d: -f3); do task.reset $i; done
+
